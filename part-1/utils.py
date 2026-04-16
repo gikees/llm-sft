@@ -86,7 +86,7 @@ def custom_transform(example):
                     chosen = random.choice(synonyms)
                     result = chosen.capitalize() if original_case else chosen
 
-        if random.random() < 0.2:
+        if random.random() < 0.2 and len(result) >= 3:
             pos = random.randint(1, len(result) - 2)
             char = result[pos].lower()
             if char in qwerty_neighbors:
