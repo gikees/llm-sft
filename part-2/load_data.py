@@ -1,7 +1,5 @@
-import os, random, re, string
-from collections import Counter
+import os, json, random
 from tqdm import tqdm
-import pickle
 
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -12,7 +10,17 @@ from transformers import T5TokenizerFast
 import torch
 
 PAD_IDX = 0
-PREFIX = "translate to SQL: "
+
+
+def read_schema(schema_path):
+    '''Convert the schema JSON into a compact table(col1, col2, ...) string.'''
+    with open(schema_path) as f:
+        schema = json.load(f)
+    parts = []
+    for table, cols in schema['ents'].items():
+        col_names = ', '.join(cols.keys())
+        parts.append(f"{table}({col_names})")
+    return ' | '.join(parts)
 
 
 class T5Dataset(Dataset):
@@ -20,6 +28,11 @@ class T5Dataset(Dataset):
     def __init__(self, data_folder, split):
         self.split = split
         self.tokenizer = T5TokenizerFast.from_pretrained('google-t5/t5-small')
+
+        # Build compact schema string once and reuse for every example
+        schema_path = os.path.join(data_folder, 'flight_database.schema')
+        self.schema_str = read_schema(schema_path)
+
         self.encoder_ids = []
         self.decoder_inputs = []
         self.decoder_targets = []
@@ -29,17 +42,31 @@ class T5Dataset(Dataset):
         nl_path = os.path.join(data_folder, f'{split}.nl')
         nl_lines = load_lines(nl_path)
 
-        # Add task prefix so T5 knows what to do
-        prefixed = [PREFIX + line for line in nl_lines]
-        enc = tokenizer(prefixed, add_special_tokens=True)
+        # Encoder input: task prefix + NL query + schema
+        prefixed = [
+            f"translate to SQL: {nl} | Schema: {self.schema_str}"
+            for nl in nl_lines
+        ]
+        enc = tokenizer(
+            prefixed,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=1024,
+        )
         self.encoder_ids = enc['input_ids']
 
         if split != 'test':
             sql_path = os.path.join(data_folder, f'{split}.sql')
             sql_lines = load_lines(sql_path)
-            dec = tokenizer(sql_lines, add_special_tokens=True)
+            dec = tokenizer(
+                sql_lines,
+                add_special_tokens=True,
+                truncation=True,
+                max_length=512,
+            )
             for sql_ids in dec['input_ids']:
-                # Teacher-forcing: decoder input is [pad] + sql[:-1], target is sql (with EOS)
+                # decoder_input : [pad] + sql_ids[:-1]  (teacher forcing, EOS removed)
+                # decoder_target: sql_ids               (full sequence including EOS)
                 self.decoder_inputs.append([tokenizer.pad_token_id] + sql_ids[:-1])
                 self.decoder_targets.append(sql_ids)
 
@@ -48,8 +75,12 @@ class T5Dataset(Dataset):
 
     def __getitem__(self, idx):
         if self.split != 'test':
-            return self.encoder_ids[idx], self.decoder_inputs[idx], self.decoder_targets[idx]
-        return self.encoder_ids[idx]
+            return (
+                torch.tensor(self.encoder_ids[idx], dtype=torch.long),
+                torch.tensor(self.decoder_inputs[idx], dtype=torch.long),
+                torch.tensor(self.decoder_targets[idx], dtype=torch.long),
+            )
+        return torch.tensor(self.encoder_ids[idx], dtype=torch.long)
 
 
 def normal_collate_fn(batch):
@@ -57,28 +88,22 @@ def normal_collate_fn(batch):
     Collation function to perform dynamic padding for training and evaluation with the
     development or validation set.
 
-    Inputs:
-        * batch (List[Any]): batch is a list of length batch_size, where each index contains what
-                             the dataset __getitem__ function returns.
-
-    Returns: To be compatible with the provided training loop, you should be returning
-        * encoder_ids: The input ids of shape BxT to be fed into the T5 encoder.
-        * encoder_mask: Mask of shape BxT associated with padding tokens in the encoder input
-        * decoder_inputs: Decoder input ids of shape BxT' to be fed into T5 decoder.
-        * decoder_targets: The target tokens with which to train the decoder (the tokens following each decoder input)
-        * initial_decoder_inputs: The very first input token to be decoder (only to be used in evaluation)
+    Returns:
+        encoder_ids:             BxT  — padded encoder input ids
+        encoder_mask:            BxT  — 1 for real tokens, 0 for padding
+        decoder_inputs:          BxT' — teacher-forcing decoder inputs
+        decoder_targets:         BxT' — target token ids (loss computed here)
+        initial_decoder_inputs:  Bx1  — start token for autoregressive generation
     '''
-    enc_ids = [torch.tensor(item[0], dtype=torch.long) for item in batch]
-    dec_inputs = [torch.tensor(item[1], dtype=torch.long) for item in batch]
-    dec_targets = [torch.tensor(item[2], dtype=torch.long) for item in batch]
+    enc = [item[0] for item in batch]
+    dec_in = [item[1] for item in batch]
+    dec_tgt = [item[2] for item in batch]
 
-    encoder_ids = pad_sequence(enc_ids, batch_first=True, padding_value=PAD_IDX)
+    encoder_ids = pad_sequence(enc, batch_first=True, padding_value=PAD_IDX)
     encoder_mask = (encoder_ids != PAD_IDX).long()
-    decoder_inputs = pad_sequence(dec_inputs, batch_first=True, padding_value=PAD_IDX)
-    decoder_targets = pad_sequence(dec_targets, batch_first=True, padding_value=PAD_IDX)
-
-    # Start token for autoregressive generation (T5 uses pad token as decoder start)
-    initial_decoder_inputs = torch.full((len(batch), 1), PAD_IDX, dtype=torch.long)
+    decoder_inputs = pad_sequence(dec_in, batch_first=True, padding_value=PAD_IDX)
+    decoder_targets = pad_sequence(dec_tgt, batch_first=True, padding_value=PAD_IDX)
+    initial_decoder_inputs = torch.zeros(len(batch), 1, dtype=torch.long)
 
     return encoder_ids, encoder_mask, decoder_inputs, decoder_targets, initial_decoder_inputs
 
@@ -87,19 +112,14 @@ def test_collate_fn(batch):
     '''
     Collation function to perform dynamic padding for inference on the test set.
 
-    Inputs:
-        * batch (List[Any]): batch is a list of length batch_size, where each index contains what
-                             the dataset __getitem__ function returns.
-
-    Recommended returns:
-        * encoder_ids: The input ids of shape BxT to be fed into the T5 encoder.
-        * encoder_mask: Mask of shape BxT associated with padding tokens in the encoder input
-        * initial_decoder_inputs: The very first input token to be decoder (only to be used in evaluation)
+    Returns:
+        encoder_ids:            BxT — padded encoder input ids
+        encoder_mask:           BxT — attention mask
+        initial_decoder_inputs: Bx1 — start token for generation
     '''
-    enc_ids = [torch.tensor(item, dtype=torch.long) for item in batch]
-    encoder_ids = pad_sequence(enc_ids, batch_first=True, padding_value=PAD_IDX)
+    encoder_ids = pad_sequence(batch, batch_first=True, padding_value=PAD_IDX)
     encoder_mask = (encoder_ids != PAD_IDX).long()
-    initial_decoder_inputs = torch.full((len(batch), 1), PAD_IDX, dtype=torch.long)
+    initial_decoder_inputs = torch.zeros(len(batch), 1, dtype=torch.long)
     return encoder_ids, encoder_mask, initial_decoder_inputs
 
 
@@ -108,23 +128,20 @@ def get_dataloader(batch_size, split):
     dset = T5Dataset(data_folder, split)
     shuffle = split == "train"
     collate_fn = normal_collate_fn if split != "test" else test_collate_fn
+    return DataLoader(dset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
 
-    dataloader = DataLoader(dset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
-    return dataloader
 
 def load_t5_data(batch_size, test_batch_size):
     train_loader = get_dataloader(batch_size, "train")
     dev_loader = get_dataloader(test_batch_size, "dev")
     test_loader = get_dataloader(test_batch_size, "test")
-
     return train_loader, dev_loader, test_loader
 
 
 def load_lines(path):
     with open(path, 'r') as f:
-        lines = f.readlines()
-        lines = [line.strip() for line in lines]
-    return lines
+        return [line.strip() for line in f.readlines()]
+
 
 def load_prompting_data(data_folder):
     train_x = load_lines(os.path.join(data_folder, 'train.nl'))

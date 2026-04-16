@@ -10,22 +10,35 @@ import wandb
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 def setup_wandb(args):
-    # Implement this if you wish to use wandb in your experiments
-    pass
+    wandb.init(
+        project="hw4-text-to-sql",
+        name=args.experiment_name,
+        config={
+            "learning_rate": args.learning_rate,
+            "batch_size": args.batch_size,
+            "max_epochs": args.max_n_epochs,
+            "optimizer": args.optimizer_type,
+            "scheduler": args.scheduler_type,
+            "finetune": args.finetune,
+        }
+    )
 
 def initialize_model(args):
     '''
-    Helper function to initialize the model. You should be either finetuning
-    the pretrained model associated with the 'google-t5/t5-small' checkpoint
-    or training a T5 model initialized with the 'google-t5/t5-small' config
-    from scratch.
+    Helper function to initialize the model. Finetuning loads pretrained
+    'google-t5/t5-small' weights; from-scratch uses the same config but
+    random initialization.
     '''
     if args.finetune:
         model = T5ForConditionalGeneration.from_pretrained('google-t5/t5-small')
     else:
         config = T5Config.from_pretrained('google-t5/t5-small')
         model = T5ForConditionalGeneration(config)
+
     model = model.to(DEVICE)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Trainable parameters: {trainable:,} / {total:,}")
     return model
 
 def mkdir(dirpath):
@@ -38,21 +51,22 @@ def mkdir(dirpath):
 def save_model(checkpoint_dir, model, best):
     mkdir(checkpoint_dir)
     filename = 'best_model.pt' if best else 'last_model.pt'
-    torch.save(model.state_dict(), os.path.join(checkpoint_dir, filename))
+    torch.save(
+        {'model_state_dict': model.state_dict(), 'config': model.config},
+        os.path.join(checkpoint_dir, filename),
+    )
 
 def load_model_from_checkpoint(args, best):
-    model_type = 'ft' if args.finetune else 'scr'
-    checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
+    checkpoint_dir = args.checkpoint_dir
     filename = 'best_model.pt' if best else 'last_model.pt'
-    path = os.path.join(checkpoint_dir, filename)
+    checkpoint = torch.load(os.path.join(checkpoint_dir, filename), map_location=DEVICE)
 
     if args.finetune:
         model = T5ForConditionalGeneration.from_pretrained('google-t5/t5-small')
     else:
-        config = T5Config.from_pretrained('google-t5/t5-small')
-        model = T5ForConditionalGeneration(config)
+        model = T5ForConditionalGeneration(checkpoint['config'])
 
-    model.load_state_dict(torch.load(path, map_location=DEVICE))
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(DEVICE)
     return model
 
@@ -84,7 +98,7 @@ def initialize_optimizer(args, model):
             optimizer_grouped_parameters, lr=args.learning_rate, eps=1e-8, betas=(0.9, 0.999)
         )
     else:
-        pass
+        raise NotImplementedError(f"Optimizer {args.optimizer_type} not implemented")
 
     return optimizer
 
@@ -99,7 +113,7 @@ def initialize_scheduler(args, optimizer, epoch_length):
     elif args.scheduler_type == "linear":
         return transformers.get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"Scheduler {args.scheduler_type} not implemented")
 
 def get_parameter_names(model, forbidden_layer_types):
     result = []
@@ -109,6 +123,5 @@ def get_parameter_names(model, forbidden_layer_types):
             for n in get_parameter_names(child, forbidden_layer_types)
             if not isinstance(child, tuple(forbidden_layer_types))
         ]
-    # Add model specific parameters (defined with nn.Parameter) since they are not in any child.
     result += list(model._parameters.keys())
     return result
