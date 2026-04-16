@@ -4,7 +4,6 @@ from tqdm import tqdm
 
 import torch
 import torch.nn as nn
-import wandb
 
 from t5_utils import initialize_model, initialize_optimizer_and_scheduler, save_model, load_model_from_checkpoint, setup_wandb
 from transformers import T5TokenizerFast
@@ -71,6 +70,7 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
         print(f"  dev loss: {eval_loss:.4f}  F1: {record_f1:.4f}  EM: {record_em:.4f}  SQL-EM: {sql_em:.4f}  err: {error_rate*100:.1f}%")
 
         if args.use_wandb:
+            import wandb
             wandb.log({
                 'train/loss': tr_loss, 'dev/loss': eval_loss,
                 'dev/record_f1': record_f1, 'dev/record_em': record_em,

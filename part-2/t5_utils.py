@@ -5,11 +5,10 @@ import torch
 import transformers
 from transformers import T5ForConditionalGeneration, T5Config
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-import wandb
-
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 def setup_wandb(args):
+    import wandb
     wandb.init(
         project="hw4-text-to-sql",
         name=args.experiment_name,
