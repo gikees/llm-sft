@@ -37,6 +37,10 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--test_batch_size', type=int, default=16)
 
+    # Training stability
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
+    parser.add_argument('--eval_every', type=int, default=1, help="Evaluate every N epochs")
+
     # Generation
     parser.add_argument('--max_gen_length', type=int, default=512)
     parser.add_argument('--num_beams', type=int, default=10)
@@ -63,6 +67,9 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     for epoch in range(args.max_n_epochs):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
         print(f"Epoch {epoch + 1}/{args.max_n_epochs} — train loss: {tr_loss:.4f}")
+
+        if (epoch + 1) % args.eval_every != 0:
+            continue
 
         eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(
             args, model, dev_loader, gt_sql_path, model_sql_path, gt_record_path, model_record_path
@@ -96,9 +103,10 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
     total_loss = 0
     total_tokens = 0
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    accum_steps = args.gradient_accumulation_steps
 
-    for encoder_input, encoder_mask, decoder_input, decoder_targets, _ in tqdm(train_loader, desc="train"):
-        optimizer.zero_grad()
+    optimizer.zero_grad()
+    for step, (encoder_input, encoder_mask, decoder_input, decoder_targets, _) in enumerate(tqdm(train_loader, desc="train")):
         encoder_input = encoder_input.to(DEVICE)
         encoder_mask = encoder_mask.to(DEVICE)
         decoder_input = decoder_input.to(DEVICE)
@@ -111,15 +119,19 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
         )['logits']
 
         loss = criterion(logits.reshape(-1, logits.size(-1)), decoder_targets.reshape(-1))
+        loss = loss / accum_steps
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
+
+        if (step + 1) % accum_steps == 0 or (step + 1) == len(train_loader):
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad()
 
         with torch.no_grad():
             num_tokens = (decoder_targets != PAD_IDX).sum().item()
-            total_loss += loss.item() * num_tokens
+            total_loss += loss.item() * accum_steps * num_tokens
             total_tokens += num_tokens
 
     return total_loss / total_tokens if total_tokens > 0 else 0

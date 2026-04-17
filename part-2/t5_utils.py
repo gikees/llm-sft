@@ -102,8 +102,10 @@ def initialize_optimizer(args, model):
     return optimizer
 
 def initialize_scheduler(args, optimizer, epoch_length):
-    num_training_steps = epoch_length * args.max_n_epochs
-    num_warmup_steps = epoch_length * args.num_warmup_epochs
+    accum = getattr(args, 'gradient_accumulation_steps', 1)
+    steps_per_epoch = epoch_length // accum
+    num_training_steps = steps_per_epoch * args.max_n_epochs
+    num_warmup_steps = steps_per_epoch * args.num_warmup_epochs
 
     if args.scheduler_type == "none":
         return None
