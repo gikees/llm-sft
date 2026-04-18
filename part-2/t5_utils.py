@@ -32,6 +32,9 @@ def initialize_model(args):
         model = T5ForConditionalGeneration.from_pretrained('google-t5/t5-small')
     else:
         config = T5Config.from_pretrained('google-t5/t5-small')
+        dropout = getattr(args, 'dropout', None)
+        if dropout is not None:
+            config.dropout_rate = dropout
         model = T5ForConditionalGeneration(config)
 
     model = model.to(DEVICE)

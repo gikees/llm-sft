@@ -40,6 +40,7 @@ def get_args():
     # Training stability
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--eval_every', type=int, default=1, help="Evaluate every N epochs")
+    parser.add_argument('--dropout', type=float, default=None)
 
     # Generation
     parser.add_argument('--max_gen_length', type=int, default=512)
