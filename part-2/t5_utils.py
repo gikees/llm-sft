@@ -28,8 +28,18 @@ def initialize_model(args):
     'google-t5/t5-small' weights; from-scratch uses the same config but
     random initialization.
     '''
+    pretrain_ckpt = getattr(args, 'pretrain_checkpoint', None)
     if args.finetune:
         model = T5ForConditionalGeneration.from_pretrained('google-t5/t5-small')
+    elif pretrain_ckpt:
+        print(f"Loading pretrained checkpoint: {pretrain_ckpt}")
+        ckpt = torch.load(pretrain_ckpt, map_location='cpu')
+        config = ckpt['config']
+        dropout = getattr(args, 'dropout', None)
+        if dropout is not None:
+            config.dropout_rate = dropout
+        model = T5ForConditionalGeneration(config)
+        model.load_state_dict(ckpt['model_state_dict'])
     else:
         config = T5Config.from_pretrained('google-t5/t5-small')
         dropout = getattr(args, 'dropout', None)

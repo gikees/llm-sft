@@ -18,6 +18,7 @@ def get_args():
 
     # Model
     parser.add_argument('--finetune', action='store_true', help="Finetune pretrained T5 (default: train from scratch)")
+    parser.add_argument('--pretrain_checkpoint', type=str, default=None, help="Path to pretrained checkpoint for from-scratch init")
 
     # Training
     parser.add_argument('--optimizer_type', type=str, default="AdamW", choices=["AdamW"])
