@@ -26,6 +26,7 @@ def get_args():
     parser.add_argument('--num_warmup_epochs', type=int, default=1)
     parser.add_argument('--scheduler_type', type=str, default='cosine')
     parser.add_argument('--grad_clip', type=float, default=1.0)
+    parser.add_argument('--from_pretrained', action='store_true', help="Start from pretrained T5 weights")
     return parser.parse_args()
 
 
@@ -66,8 +67,12 @@ def main():
     args = get_args()
     print(f"Pretraining from scratch | device: {DEVICE}")
 
-    config = T5Config.from_pretrained('google-t5/t5-small')
-    model = T5ForConditionalGeneration(config).to(DEVICE)
+    if args.from_pretrained:
+        model = T5ForConditionalGeneration.from_pretrained('google-t5/t5-small').to(DEVICE)
+        print("Starting from pretrained T5 weights")
+    else:
+        config = T5Config.from_pretrained('google-t5/t5-small')
+        model = T5ForConditionalGeneration(config).to(DEVICE)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     loader = get_pretrain_dataloader(args.sql_data_path, args.wiki_data_path, args.batch_size)
